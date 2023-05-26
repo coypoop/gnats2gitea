@@ -7,10 +7,10 @@ import (
 	"flag"
 	"fmt"
 	"github.com/DusanKasan/parsemail"
+	"github.com/ProtonMail/go-mime"
 	"github.com/grokify/html-strip-tags-go"
 	"html"
 	"io/ioutil"
-	"mime"
 	"net/http"
 	"net/mail"
 	"os"
@@ -32,15 +32,20 @@ type Reply struct {
 }
 
 type GnatsIssue struct {
-	Synopsis    string
-	Number      string
-	State       string
-	Category    string
-	Environment string
-	Replies     []Reply
-	Description string
-	HowToRepeat string
-	Fix         string
+	Synopsis     string
+	Number       string
+	State        string
+	Category     string
+	Environment  string
+	ArrivalDate  time.Time
+	Originator   string
+	Release      string
+	Organization string
+	Description  string
+	HowToRepeat  string
+	Fix          string
+	ReleaseNote  string
+	Replies      []Reply
 }
 
 type ConversionState struct {
@@ -208,6 +213,7 @@ func (s *ConversionState) create_labels() (createdLabels []*gitea.Label) {
 	var stateLabels = map[string]string{
 		"analyzed":        "Analyzed",
 		"feedback":        "Pending feedback from reporter",
+		"dead":            "Dead",
 		"suspended":       "Suspended",
 		"needs-pullups":   "Should request a backport of this to a release branch",
 		"pending-pullups": "Waiting for a backport request to be fulfilled by release engineering",
@@ -220,6 +226,7 @@ func (s *ConversionState) create_labels() (createdLabels []*gitea.Label) {
 		"lib",
 		"misc",
 		"pkg",
+		"port-acorn26",
 		"port-acorn32",
 		"port-algor",
 		"port-alpha",
@@ -273,6 +280,11 @@ func (s *ConversionState) create_labels() (createdLabels []*gitea.Label) {
 		"port-sbmips",
 		"port-sgimips",
 		"port-sh3",
+		"port-mmeye",
+		"port-hp700",
+		"port-cesfic",
+		"port-evbsh5",
+		"port-sh5",
 		"port-shark",
 		"port-sparc",
 		"port-sparc64",
@@ -289,6 +301,8 @@ func (s *ConversionState) create_labels() (createdLabels []*gitea.Label) {
 		"toolchain",
 		"xsrc",
 		"confidential",
+		"y2k",
+		"pending",
 	}
 	for i, label := range categoryLabels {
 		color := labelColors[i%len(labelColors)]
@@ -332,10 +346,9 @@ type GiteaIssue struct {
 }
 
 func format_email_reply(reply Reply) string {
-	dec := new(mime.WordDecoder)
 	text := ""
 	for _, from := range reply.From {
-		fromDecoded, err := dec.DecodeHeader(from.String())
+		fromDecoded, err := gomime.DecodeHeader(from.String())
 		if err != nil {
 			panic(err)
 		}
@@ -384,7 +397,15 @@ func fixup_title(title string) string {
 }
 
 func convert_gitea(gnatsIssue *GnatsIssue, labels []*gitea.Label) GiteaIssue {
-	body := fmt.Sprintf("```Description:\n%s\nHow-To-Repeat:\n%s\nFix:\n%s```", gnatsIssue.Description, gnatsIssue.HowToRepeat, gnatsIssue.Fix)
+	body := fmt.Sprintf("From %s on %s:\n```\n"+
+		"Organization:\n%s\nEnvironment:%s\nDescription:\n%s\n"+
+		"How-To-Repeat:\n%s\nFix:\n%s\n"+
+		"Release:\n%s\n"+
+		"```\n",
+		gnatsIssue.Originator, gnatsIssue.ArrivalDate.String(),
+		gnatsIssue.Organization, gnatsIssue.Environment, gnatsIssue.Description,
+		gnatsIssue.HowToRepeat, gnatsIssue.Fix,
+		gnatsIssue.ReleaseNote)
 	giteaReplies := []string{}
 	for _, reply := range gnatsIssue.Replies {
 		if reply.IsEmail {
@@ -434,15 +455,20 @@ func parse_gnats(number int) *GnatsIssue {
 	if !strings.Contains(raw_gnats_bug, "Audit-Trail") {
 		// Confidential bug, we have no access
 		return &GnatsIssue{
-			Number:      strconv.Itoa(number),
-			Synopsis:    "confidential bug report",
-			Category:    "confidential",
-			State:       "closed",
-			Environment: "",
-			Description: "Couldn't access bug report",
-			HowToRepeat: "",
-			Fix:         "",
-			Replies:     []Reply{},
+			Number:       strconv.Itoa(number),
+			Synopsis:     "confidential bug report",
+			Category:     "confidential",
+			State:        "closed",
+			Environment:  "",
+			ArrivalDate:  time.Now(),
+			Originator:   "",
+			Release:      "",
+			Organization: "",
+			Description:  "Couldn't access bug report",
+			HowToRepeat:  "",
+			Fix:          "",
+			ReleaseNote:  "",
+			Replies:      []Reply{},
 		}
 	}
 	dictionary := split_to_attributes(raw_gnats_bug)
@@ -476,15 +502,20 @@ func parse_gnats(number int) *GnatsIssue {
 	}
 
 	return &GnatsIssue{
-		Synopsis:    pair_value_by_key(dictionary, "Synopsis"),
-		Number:      pair_value_by_key(dictionary, "Number"),
-		Category:    pair_value_by_key(dictionary, "Category"),
-		State:       pair_value_by_key(dictionary, "State"),
-		Environment: pair_value_by_key(dictionary, "Environment"),
-		Description: pair_value_by_key(dictionary, "Description"),
-		HowToRepeat: pair_value_by_key(dictionary, "How-To-Repeat"),
-		Fix:         pair_value_by_key(dictionary, "Fix"),
-		Replies:     replies,
+		Synopsis:     pair_value_by_key(dictionary, "Synopsis"),
+		Number:       pair_value_by_key(dictionary, "Number"),
+		Category:     pair_value_by_key(dictionary, "Category"),
+		State:        pair_value_by_key(dictionary, "State"),
+		Environment:  safe_pair_value_by_key(dictionary, "Environment"),
+		ArrivalDate:  parse_gnats_time(pair_value_by_key(dictionary, "Arrival-Date")),
+		Originator:   pair_value_by_key(dictionary, "Originator"),
+		Release:      pair_value_by_key(dictionary, "Release"),
+		Organization: safe_pair_value_by_key(dictionary, "Organization"),
+		Description:  safe_pair_value_by_key(dictionary, "Description"),
+		HowToRepeat:  safe_pair_value_by_key(dictionary, "How-To-Repeat"),
+		Fix:          pair_value_by_key(dictionary, "Fix"),
+		ReleaseNote:  safe_pair_value_by_key(dictionary, "Release-Note"),
+		Replies:      replies,
 	}
 }
 
@@ -638,6 +669,15 @@ func pair_value_by_key(dictionary []parsed_pair, match_key string) string {
 	panic("No match to " + match_key)
 }
 
+func safe_pair_value_by_key(dictionary []parsed_pair, match_key string) string {
+	for _, pair := range dictionary {
+		if pair.key == match_key {
+			return pair.value
+		}
+	}
+	return ""
+}
+
 func valid_gnats_key_start(text string) bool {
 	if !strings.HasPrefix(text, ">") {
 		return false
@@ -649,6 +689,7 @@ func valid_gnats_key_start(text string) bool {
 	key := current_match0[0]
 	switch key {
 	case ">Number":
+	case ">Notify-List":
 	case ">Category":
 	case ">Synopsis":
 	case ">Confidential":
@@ -690,7 +731,7 @@ func split_to_attributes(text string) []parsed_pair {
 		if valid_gnats_key_start(scanner.Text()) && keep_state {
 			current_match1 := parsed_pair{
 				key:   strings.TrimPrefix(current_match0[0], ">"),
-				value: strings.TrimSpace(current_match0[1]),
+				value: strings.TrimLeft(current_match0[1], " "),
 			}
 			dictionary = append(dictionary, current_match1)
 			keep_state = false
@@ -710,7 +751,7 @@ func split_to_attributes(text string) []parsed_pair {
 	if keep_state {
 		current_match1 := parsed_pair{
 			key:   strings.TrimPrefix(current_match0[0], ">"),
-			value: strings.TrimSpace(current_match0[1]),
+			value: current_match0[1],
 		}
 		dictionary = append(dictionary, current_match1)
 		keep_state = false
